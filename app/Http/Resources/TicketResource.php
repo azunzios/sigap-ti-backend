@@ -1,0 +1,154 @@
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class TicketResource extends JsonResource
+{
+    /**
+     * Transform the resource into an array.
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(Request $request): array
+    {
+        $baseData = [
+            'id' => $this->id,
+            'ticketNumber' => $this->ticket_number,
+            'type' => $this->type,
+            'title' => $this->title,
+            'description' => $this->description,
+            'categoryId' => $this->category_id,
+            'category' => $this->whenLoaded('category', function () {
+                return $this->category ? [
+                    'id' => $this->category->id,
+                    'name' => $this->category->name,
+                    'type' => $this->category->type,
+                ] : null;
+            }),
+            
+            // User info - fetched from user relationship
+            'userId' => $this->user_id,
+            'userName' => $this->whenLoaded('user', fn() => $this->user?->name),
+            'userEmail' => $this->whenLoaded('user', fn() => $this->user?->email),
+            'userPhone' => $this->whenLoaded('user', fn() => $this->user?->phone),
+            'unitKerja' => $this->whenLoaded('user', fn() => $this->user?->unit_kerja),
+            
+            // Assignment
+            'assignedTo' => $this->assigned_to,
+            'assignedUser' => $this->whenLoaded('assignedUser', function () {
+                return $this->assignedUser ? [
+                    'id' => $this->assignedUser->id,
+                    'name' => $this->assignedUser->name,
+                    'email' => $this->assignedUser->email,
+                ] : null;
+            }),
+            
+            // Status & Timeline
+            'status' => $this->status,
+            'workOrdersReady' => $this->work_orders_ready ?? false,
+            'rejectionReason' => $this->rejection_reason, // Alasan penolakan untuk semua tipe tiket
+            'timeline' => TimelineResource::collection($this->whenLoaded('timeline')),
+            
+            // Button status untuk perbaikan
+            'buttonStatus' => $this->when(
+                $this->type === 'perbaikan',
+                $this->getButtonStatus()
+            ),
+            
+            // Comments
+            'commentsCount' => $this->whenLoaded('comments', function () {
+                return $this->comments->count();
+            }),
+            
+            // Work Orders
+            'workOrders' => WorkOrderResource::collection($this->whenLoaded('workOrders')),
+            
+            'createdAt' => $this->created_at?->toIso8601String(),
+            'updatedAt' => $this->updated_at?->toIso8601String(),
+        ];
+
+        // Add type-specific fields
+        if ($this->type === 'perbaikan') {
+            $baseData = array_merge($baseData, [
+                'assetCode' => $this->kode_barang, // Menggunakan kode_barang dari struktur BMN
+                'assetNUP' => $this->nup, // Menggunakan nup dari struktur BMN
+                'assetLocation' => $this->asset_location,
+                'severity' => $this->severity,
+                'finalProblemType' => $this->final_problem_type,
+                'repairable' => $this->repairable,
+                'unrepairableReason' => $this->unrepairable_reason,
+                'workOrderId' => $this->work_order_id,
+                'attachments' => $this->attachments ?? [],
+                'formData' => $this->form_data,
+                'diagnosis' => $this->whenLoaded('diagnosis', function () {
+                    return $this->diagnosis ? new TicketDiagnosisResource($this->diagnosis) : null;
+                }),
+            ]);
+        } else if ($this->type === 'zoom_meeting') {
+            $baseData = array_merge($baseData, [
+                'date' => $this->zoom_date?->format('Y-m-d'),
+                'startTime' => $this->zoom_start_time,
+                'endTime' => $this->zoom_end_time,
+                'duration' => $this->zoom_duration,
+                'estimatedParticipants' => $this->zoom_estimated_participants,
+                'coHosts' => $this->zoom_co_hosts ?? [],
+                'breakoutRooms' => $this->zoom_breakout_rooms,
+                'meetingLink' => $this->zoom_meeting_link,
+                'meetingId' => $this->zoom_meeting_id,
+                'passcode' => $this->zoom_passcode,
+                'rejectionReason' => $this->zoom_rejection_reason,
+                'attachments' => $this->zoom_attachments ?? [],
+                'zoomAccountId' => $this->zoom_account_id,
+                'zoomAccount' => $this->whenLoaded('zoomAccount', function () {
+                    return $this->zoomAccount ? [
+                        'id' => $this->zoomAccount->id,
+                        'accountId' => $this->zoomAccount->account_id,
+                        'name' => $this->zoomAccount->name,
+                        'email' => $this->zoomAccount->email,
+                        'hostKey' => $this->zoomAccount->host_key,
+                        'color' => $this->zoomAccount->color,
+                    ] : null;
+                }),
+            ]);
+        }
+
+        return $baseData;
+    }
+
+    private function getButtonStatus()
+    {
+        $diagnosis = $this->diagnosis;
+        
+        $hasDiagnosis = $diagnosis !== null;
+        $repairType = $diagnosis?->repair_type;
+        $needsWorkOrder = in_array($repairType, ['need_sparepart', 'need_vendor', 'need_license']);
+        $canBeCompleted = in_array($repairType, ['direct_repair', 'unrepairable']);
+        
+        // Get work orders
+        $workOrders = $this->workOrders ?? [];
+        $allWorkOrdersDelivered = count($workOrders) > 0
+            ? collect($workOrders)->every(fn($wo) => in_array($wo->status, ['delivered', 'completed', 'failed', 'cancelled']))
+            : true;
+        
+        // Check work_orders_ready flag
+        $workOrdersReady = $this->work_orders_ready ?? false;
+        
+        return [
+            'ubahDiagnosis' => [
+                'enabled' => true,
+                'reason' => null,
+            ],
+            'workOrder' => [
+                'enabled' => $hasDiagnosis && $needsWorkOrder,
+                'reason' => !$hasDiagnosis ? 'Diagnosis belum diisi' : (!$needsWorkOrder ? 'Diagnosis tidak memerlukan work order' : null),
+            ],
+            'selesaikan' => [
+                'enabled' => $hasDiagnosis && (!$needsWorkOrder || $workOrdersReady),
+                'reason' => !$hasDiagnosis ? 'Diagnosis belum diisi' : ($needsWorkOrder && !$workOrdersReady ? 'Klik "Lanjutkan Perbaikan" setelah work order selesai' : null),
+            ],
+        ];
+    }
+}
