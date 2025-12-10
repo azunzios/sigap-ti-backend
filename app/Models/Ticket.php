@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Ticket extends Model
 {
@@ -76,14 +77,6 @@ class Ticket extends Model
     }
 
     /**
-     * Alias for assignedUser - get the technician assigned to this ticket
-     */
-    public function assignedTechnician(): BelongsTo
-    {
-        return $this->belongsTo(User::class, 'assigned_to');
-    }
-
-    /**
      * Get the category
      */
     public function category(): BelongsTo
@@ -113,6 +106,14 @@ class Ticket extends Model
     public function workOrders(): HasMany
     {
         return $this->hasMany(WorkOrder::class);
+    }
+
+    /**
+     * Get the feedback for this ticket
+     */
+    public function feedback(): HasOne
+    {
+        return $this->hasOne(TicketFeedback::class);
     }
 
     /**

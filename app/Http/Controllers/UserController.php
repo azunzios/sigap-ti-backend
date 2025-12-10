@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use App\Models\AuditLog;
+use App\Mail\NewUserMail;
+use Illuminate\Support\Facades\Mail;
 
 class UserController extends Controller
 {
@@ -82,9 +84,34 @@ class UserController extends Controller
             'is_active' => 'boolean',
         ]);
 
+        // Store plain password for email
+        $plainPassword = $validated['password'];
+        
         $validated['password'] = Hash::make($validated['password']);
 
+        // Set role (single) dari roles dengan priority logic
+        // Untuk multi-role, ambil role pertama yang paling tinggi prioritasnya
+        // Priority: super_admin > admin_layanan > admin_penyedia > teknisi > pegawai
+        $rolePriority = ['super_admin', 'admin_layanan', 'admin_penyedia', 'teknisi', 'pegawai'];
+        $primaryRole = 'pegawai'; // default fallback
+        
+        foreach ($rolePriority as $role) {
+            if (in_array($role, $validated['roles'])) {
+                $primaryRole = $role;
+                break; // Ambil yang pertama ketemu (prioritas tertinggi)
+            }
+        }
+        $validated['role'] = $primaryRole;
+
         $user = User::create($validated);
+
+        // Send welcome email with credentials
+        try {
+            Mail::to($user->email)->send(new NewUserMail($user, $plainPassword));
+        } catch (\Exception $e) {
+            // Log error but don't fail user creation
+            \Log::error('Failed to send new user email: ' . $e->getMessage());
+        }
 
         // Audit log
         AuditLog::create([
@@ -121,7 +148,23 @@ class UserController extends Controller
             unset($validated['password']);
         }
 
-        $user->update($validated);
+        // Set role (single) dari roles dengan priority logic jika roles diupdate
+        if (isset($validated['roles'])) {
+            // Priority: super_admin > admin_layanan > admin_penyedia > teknisi > pegawai
+            $rolePriority = ['super_admin', 'admin_layanan', 'admin_penyedia', 'teknisi', 'pegawai'];
+            $primaryRole = 'pegawai'; // default fallback
+            
+            foreach ($rolePriority as $role) {
+                if (in_array($role, $validated['roles'])) {
+                    $primaryRole = $role;
+                    break; // Ambil yang pertama ketemu (prioritas tertinggi)
+                }
+            }
+            $validated['role'] = $primaryRole;
+        }
+
+        $user->fill($validated);
+        $user->save();
 
         // Audit log
         AuditLog::create([
@@ -164,6 +207,10 @@ class UserController extends Controller
         ]);
 
         $user->roles = $validated['roles'];
+        
+        // Ensure active role is valid
+        $this->ensureActiveRoleIsValid($user);
+        
         $user->save();
 
         // Audit log
@@ -177,6 +224,9 @@ class UserController extends Controller
         return new UserResource($user);
     }
 
+    /**
+     * Helper to ensure active role is in the roles array
+     */
     /**
      * Get current authenticated user
      */
@@ -219,6 +269,45 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'Profil berhasil diperbarui',
+            'user' => new UserResource($user),
+        ]);
+    }
+
+    /**
+     * Change user active role
+     */
+    public function changeRole(Request $request)
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'role' => 'required|string',
+        ]);
+
+        $requestedRole = $validated['role'];
+        
+        // Ensure the requested role is in the user's available roles
+        $availableRoles = is_array($user->roles) ? $user->roles : json_decode($user->roles ?? '[]', true);
+        
+        if (!in_array($requestedRole, $availableRoles)) {
+            throw ValidationException::withMessages([
+                'role' => ['You do not have permission to switch to this role.'],
+            ]);
+        }
+
+        $user->role = $requestedRole;
+        $user->save();
+
+        // Audit log
+        AuditLog::create([
+            'user_id' => $user->id,
+            'action' => 'ROLE_SWITCHED',
+            'details' => "User switched active role to: {$requestedRole}",
+            'ip_address' => request()->ip(),
+        ]);
+
+        return response()->json([
+            'message' => 'Role berhasil diubah',
             'user' => new UserResource($user),
         ]);
     }

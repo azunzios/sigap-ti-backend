@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Facades\Storage;
 
 class TicketResource extends JsonResource
 {
@@ -66,6 +67,18 @@ class TicketResource extends JsonResource
             // Work Orders
             'workOrders' => WorkOrderResource::collection($this->whenLoaded('workOrders')),
             
+            // Feedback
+            'feedback' => $this->whenLoaded('feedback', function () {
+                return $this->feedback ? [
+                    'id' => $this->feedback->id,
+                    'userId' => $this->feedback->user_id,
+                    'userName' => $this->feedback->user?->name,
+                    'rating' => $this->feedback->rating,
+                    'feedbackText' => $this->feedback->feedback_text,
+                    'createdAt' => $this->feedback->created_at?->toIso8601String(),
+                ] : null;
+            }),
+            
             'createdAt' => $this->created_at?->toIso8601String(),
             'updatedAt' => $this->updated_at?->toIso8601String(),
         ];
@@ -81,7 +94,7 @@ class TicketResource extends JsonResource
                 'repairable' => $this->repairable,
                 'unrepairableReason' => $this->unrepairable_reason,
                 'workOrderId' => $this->work_order_id,
-                'attachments' => $this->attachments ?? [],
+                'attachments' => $this->transformAttachments($this->attachments ?? []),
                 'formData' => $this->form_data,
                 'diagnosis' => $this->whenLoaded('diagnosis', function () {
                     return $this->diagnosis ? new TicketDiagnosisResource($this->diagnosis) : null;
@@ -100,7 +113,7 @@ class TicketResource extends JsonResource
                 'meetingId' => $this->zoom_meeting_id,
                 'passcode' => $this->zoom_passcode,
                 'rejectionReason' => $this->zoom_rejection_reason,
-                'attachments' => $this->zoom_attachments ?? [],
+                'attachments' => $this->transformAttachments($this->zoom_attachments ?? []),
                 'zoomAccountId' => $this->zoom_account_id,
                 'zoomAccount' => $this->whenLoaded('zoomAccount', function () {
                     return $this->zoomAccount ? [
@@ -120,6 +133,9 @@ class TicketResource extends JsonResource
 
     private function getButtonStatus()
     {
+        // Tiket yang sudah rejected atau closed tidak bisa diubah
+        $isClosed = in_array($this->status, ['rejected', 'closed']);
+        
         $diagnosis = $this->diagnosis;
         
         $hasDiagnosis = $diagnosis !== null;
@@ -138,17 +154,40 @@ class TicketResource extends JsonResource
         
         return [
             'ubahDiagnosis' => [
-                'enabled' => true,
-                'reason' => null,
+                'enabled' => !$isClosed,
+                'reason' => $isClosed ? 'Tiket sudah ditutup' : null,
             ],
             'workOrder' => [
-                'enabled' => $hasDiagnosis && $needsWorkOrder,
-                'reason' => !$hasDiagnosis ? 'Diagnosis belum diisi' : (!$needsWorkOrder ? 'Diagnosis tidak memerlukan work order' : null),
+                'enabled' => !$isClosed && $hasDiagnosis && $needsWorkOrder,
+                'reason' => $isClosed ? 'Tiket sudah ditutup' : (!$hasDiagnosis ? 'Diagnosis belum diisi' : (!$needsWorkOrder ? 'Diagnosis tidak memerlukan work order' : null)),
             ],
             'selesaikan' => [
-                'enabled' => $hasDiagnosis && (!$needsWorkOrder || $workOrdersReady),
-                'reason' => !$hasDiagnosis ? 'Diagnosis belum diisi' : ($needsWorkOrder && !$workOrdersReady ? 'Klik "Lanjutkan Perbaikan" setelah work order selesai' : null),
+                'enabled' => !$isClosed && $hasDiagnosis && (!$needsWorkOrder || $workOrdersReady),
+                'reason' => $isClosed ? 'Tiket sudah ditutup' : (!$hasDiagnosis ? 'Diagnosis belum diisi' : ($needsWorkOrder && !$workOrdersReady ? 'Klik "Lanjutkan Perbaikan" setelah work order selesai' : null)),
             ],
         ];
+    }
+
+    /**
+     * Transform attachments array to ensure correct URL with proper encoding
+     */
+    private function transformAttachments(array $attachments): array
+    {
+        return collect($attachments)->map(function ($attachment) {
+            // Regenerate URL from path to ensure correct APP_URL and proper encoding
+            if (isset($attachment['path'])) {
+                // Split path into directory and filename
+                $pathParts = explode('/', $attachment['path']);
+                $filename = array_pop($pathParts);
+                $directory = implode('/', $pathParts);
+                
+                // Encode filename to handle spaces and special characters
+                $encodedFilename = rawurlencode($filename);
+                $encodedPath = $directory ? $directory . '/' . $encodedFilename : $encodedFilename;
+                
+                $attachment['url'] = config('app.url') . '/storage/' . $encodedPath;
+            }
+            return $attachment;
+        })->toArray();
     }
 }

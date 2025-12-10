@@ -561,10 +561,15 @@ class WorkOrderController extends Controller
      */
     public function kartuKendali(Request $request): JsonResponse
     {
-        // Ambil semua tiket perbaikan
+        // Ambil semua tiket perbaikan kecuali yang rejected dan direct_repair
         $query = Ticket::where('type', 'perbaikan')
-            ->with(['user', 'diagnosis.technician', 'assignedTechnician', 'workOrders' => function ($q) {
-                $q->where('status', 'completed')->orderBy('completed_at', 'desc');
+            ->where('status', '!=', 'rejected')
+            ->whereHas('diagnosis', function ($q) {
+                $q->where('repair_type', '!=', 'direct_repair');
+            })
+            ->with(['user', 'diagnosis.technician', 'assignedUser', 'workOrders' => function ($q) {
+                $q->where('status', 'completed')
+                  ->orderBy('completed_at', 'desc');
             }]);
 
         // Search
@@ -572,7 +577,13 @@ class WorkOrderController extends Controller
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('ticket_number', 'like', "%{$search}%")
-                    ->orWhere('title', 'like', "%{$search}%");
+                    ->orWhere('title', 'like', "%{$search}%")
+                    ->orWhere('kode_barang', 'like', "%{$search}%")
+                    ->orWhere('nup', 'like', "%{$search}%")
+                    ->orWhere('form_data->assetCode', 'like', "%{$search}%")
+                    ->orWhere('form_data->kode_barang', 'like', "%{$search}%")
+                    ->orWhere('form_data->assetNUP', 'like', "%{$search}%")
+                    ->orWhere('form_data->nup', 'like', "%{$search}%");
             });
         }
 
@@ -585,7 +596,13 @@ class WorkOrderController extends Controller
         $tickets = $query->orderBy('updated_at', 'desc')->paginate($perPage);
 
         // Transform data - 1 entry per tiket
+        // Filter hanya tiket yang punya work order completed (bukan unsuccessful)
         $data = $tickets->map(function ($ticket) {
+            // Skip tiket yang tidak punya work order completed
+            if ($ticket->workOrders->isEmpty()) {
+                return null;
+            }
+            
             $formData = is_string($ticket->form_data) ? json_decode($ticket->form_data, true) : ($ticket->form_data ?? []);
             
             $assetCode = $formData['assetCode'] ?? $formData['kode_barang'] ?? $ticket->kode_barang ?? null;
@@ -610,7 +627,7 @@ class WorkOrderController extends Controller
             $workOrderCount = $ticket->workOrders->count();
             
             // Get teknisi dari assignedTo atau diagnosis
-            $technicianName = $ticket->assignedTechnician?->name 
+            $technicianName = $ticket->assignedUser?->name 
                 ?? $ticket->diagnosis?->technician?->name 
                 ?? $latestWo?->createdBy?->name 
                 ?? null;
@@ -635,7 +652,7 @@ class WorkOrderController extends Controller
                 'requesterId' => $ticket->user_id,
                 'requesterName' => $ticket->user?->name,
             ];
-        });
+        })->filter()->values();
 
         return response()->json([
             'success' => true,
@@ -660,7 +677,7 @@ class WorkOrderController extends Controller
     public function kartuKendaliDetail(Ticket $ticket): JsonResponse
     {
         // Load relations - termasuk semua work orders (completed atau tidak)
-        $ticket->load(['user', 'diagnosis.technician', 'assignedTechnician', 'workOrders' => function ($q) {
+        $ticket->load(['user', 'diagnosis.technician', 'assignedUser', 'workOrders' => function ($q) {
             $q->with('createdBy')->orderBy('completed_at', 'asc');
         }]);
         
@@ -729,6 +746,7 @@ class WorkOrderController extends Controller
                 $allSpareparts[] = [
                     'name' => $item['name'] ?? $item['sparepart_name'] ?? '-',
                     'quantity' => $item['quantity'] ?? $item['qty'] ?? 1,
+                    'unit' => $item['unit'] ?? '-',
                     'completedAt' => $wo->completed_at?->toISOString(),
                     'technicianName' => $wo->createdBy?->name,
                 ];
@@ -759,16 +777,26 @@ class WorkOrderController extends Controller
             ];
         }
         
-        // Pending work orders (belum completed)
-        $pendingWorkOrders = $allWorkOrders->where('status', '!=', 'completed')->map(fn($wo) => [
+        // Pending work orders (belum completed, kecualikan unsuccessful)
+        $pendingWorkOrders = $allWorkOrders->whereNotIn('status', ['completed', 'unsuccessful'])->map(fn($wo) => [
             'id' => $wo->id,
             'type' => $wo->type,
             'status' => $wo->status,
             'createdAt' => $wo->created_at?->toISOString(),
         ])->values()->toArray();
 
+        // Unsuccessful work orders
+        $unsuccessfulWorkOrders = $allWorkOrders->where('status', 'unsuccessful');
+        $unsuccessfulWorkOrdersData = $unsuccessfulWorkOrders->map(fn($wo) => [
+            'id' => $wo->id,
+            'type' => $wo->type,
+            'status' => $wo->status,
+            'createdAt' => $wo->created_at?->toISOString(),
+            'updatedAt' => $wo->updated_at?->toISOString(),
+        ])->values()->toArray();
+
         // Teknisi - dari assigned atau diagnosis
-        $technicianName = $ticket->assignedTechnician?->name ?? $diagnosis?->technician?->name ?? null;
+        $technicianName = $ticket->assignedUser?->name ?? $diagnosis?->technician?->name ?? null;
 
         $data = [
             'id' => $ticket->id,
@@ -792,7 +820,9 @@ class WorkOrderController extends Controller
             'licenses' => $allLicenses,
             'totalWorkOrders' => $allWorkOrders->count(),
             'completedWorkOrders' => $completedWorkOrders->count(),
+            'unsuccessfulWorkOrders' => $unsuccessfulWorkOrders->count(),
             'pendingWorkOrders' => $pendingWorkOrders,
+            'unsuccessfulWorkOrdersList' => $unsuccessfulWorkOrdersData,
             // Diagnosis data
             'diagnosis' => $diagnosisData,
             // Requester info
@@ -815,6 +845,7 @@ class WorkOrderController extends Controller
      */
     public function exportKartuKendali(Request $request)
     {
+        // Hanya ambil work order yang benar-benar completed (bukan unsuccessful)
         $workOrders = WorkOrder::where('status', 'completed')
             ->with(['ticket.user', 'ticket.diagnosis.technician', 'createdBy'])
             ->orderBy('completed_at', 'desc')
@@ -833,7 +864,7 @@ class WorkOrderController extends Controller
             if (is_string($items)) {
                 $items = json_decode($items, true) ?? [];
             }
-            $itemsText = collect($items)->map(fn($i) => ($i['name'] ?? $i['item_name'] ?? '') . ' x' . ($i['quantity'] ?? 1))->implode(', ');
+            $itemsText = collect($items)->map(fn($i) => ($i['name'] ?? $i['item_name'] ?? '') . ' ' . ($i['quantity'] ?? 1) . ' ' . ($i['unit'] ?? ''))->implode(', ');
 
             $rows[] = [
                 'no' => $no++,
@@ -854,7 +885,7 @@ class WorkOrderController extends Controller
                 'license_name' => $wo->license_name ?? '-',
                 'license_description' => $wo->license_description ?? '-',
                 'completion_notes' => $wo->completion_notes ?? '-',
-                'completed_at' => $wo->completed_at?->format('d/m/Y H:i') ?? '-',
+                'completed_at' => $wo->completed_at?->timezone('Asia/Jakarta')->format('d/m/Y H:i') ?? '-',
             ];
         }
 
@@ -921,6 +952,107 @@ class WorkOrderController extends Controller
         }, $filename, [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+        ]);
+    }
+
+    /**
+     * Change BMN condition for unsuccessful work order (sparepart/vendor only)
+     */
+    public function changeBMNCondition(Request $request, WorkOrder $workOrder): JsonResponse
+    {
+        $user = Auth::user();
+
+        // Only teknisi can change BMN condition
+        if (!$this->userHasRole($user, 'teknisi')) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        // Validate work order type and status
+        if (!in_array($workOrder->type, ['sparepart', 'vendor'])) {
+            return response()->json(['message' => 'BMN condition can only be changed for sparepart or vendor work orders'], 400);
+        }
+
+        if ($workOrder->status !== 'unsuccessful') {
+            return response()->json(['message' => 'BMN condition can only be changed for unsuccessful work orders'], 400);
+        }
+
+        $validated = $request->validate([
+            'asset_condition_change' => 'required|in:Baik,Rusak Ringan,Rusak Berat',
+        ]);
+
+        // Get ticket and asset
+        $ticket = $workOrder->ticket;
+        if (!$ticket) {
+            return response()->json(['message' => 'Ticket not found'], 404);
+        }
+
+        $asset = \App\Models\Asset::findByCodeAndNup($ticket->kode_barang, $ticket->nup);
+        if (!$asset) {
+            return response()->json(['message' => 'Asset BMN not found'], 404);
+        }
+
+        $oldCondition = $asset->kondisi;
+        $newCondition = $validated['asset_condition_change'];
+
+        // Update work order
+        $workOrder->update([
+            'asset_condition_change' => $newCondition,
+        ]);
+
+        // Update asset condition
+        $asset->update(['kondisi' => $newCondition]);
+
+        // Create audit log
+        \App\Models\AuditLog::create([
+            'user_id' => $user->id,
+            'action' => 'ASSET_CONDITION_CHANGED',
+            'details' => "Asset {$asset->kode_barang} NUP {$asset->nup} condition changed from {$oldCondition} to {$newCondition} via work order #{$workOrder->id}",
+            'ip_address' => request()->ip(),
+        ]);
+
+        // Send notification to superadmins
+        $superAdmins = \App\Models\User::where('role', 'super_admin')->get();
+        foreach ($superAdmins as $admin) {
+            \App\Models\Notification::create([
+                'user_id' => $admin->id,
+                'type' => 'warning',
+                'title' => 'Perubahan Kondisi Asset BMN (Work Order)',
+                'message' => "Kondisi barang BMN telah diubah melalui work order yang tidak berhasil:\n\nTiket: {$ticket->ticket_number}\nWork Order: #{$workOrder->id} ({$workOrder->type})\n\nKode Barang: {$asset->kode_barang}\nNUP: {$asset->nup}\nNama Barang: {$asset->nama_barang}\nMerek/Tipe: {$asset->merek}\n\nKondisi Lama: {$oldCondition}\nKondisi Baru: {$newCondition}\n\nDiubah oleh: {$user->name}",
+                'reference_type' => 'asset',
+                'reference_id' => $asset->id,
+                'action_url' => "/tickets/{$ticket->id}",
+                'data' => json_encode([
+                    'ticket_id' => $ticket->id,
+                    'work_order_id' => $workOrder->id,
+                    'asset_id' => $asset->id,
+                    'kode_barang' => $asset->kode_barang,
+                    'nup' => $asset->nup,
+                    'old_condition' => $oldCondition,
+                    'new_condition' => $newCondition,
+                ]),
+            ]);
+        }
+
+        // Create timeline entry
+        Timeline::create([
+            'ticket_id' => $ticket->id,
+            'user_id' => $user->id,
+            'action' => 'ASSET_CONDITION_CHANGED',
+            'description' => "Kondisi BMN diubah menjadi {$newCondition} (Work Order #{$workOrder->id} tidak berhasil)",
+            'details' => json_encode([
+                'work_order_id' => $workOrder->id,
+                'work_order_type' => $workOrder->type,
+                'old_condition' => $oldCondition,
+                'new_condition' => $newCondition,
+                'asset_code' => $asset->kode_barang,
+                'asset_nup' => $asset->nup,
+            ]),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Kondisi BMN berhasil diubah',
+            'data' => new WorkOrderResource($workOrder->fresh()),
         ]);
     }
 }

@@ -35,6 +35,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/profile', [UserController::class, 'updateProfile']);
     Route::post('/change-password', [UserController::class, 'changePassword']);
     Route::post('/upload-avatar', [UserController::class, 'uploadAvatar']);
+    Route::post('/change-role', [UserController::class, 'changeRole']);
     Route::post('/logout', [AuthController::class, 'logout']);
     
     // User Management Routes (admin only - will add middleware)
@@ -88,6 +89,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tickets/{ticket}/comments', [CommentController::class, 'index']);
     Route::post('/tickets/{ticket}/comments', [CommentController::class, 'store']);
 
+    // Ticket Feedback Routes
+    Route::post('/tickets/{ticket}/feedback', [TicketController::class, 'storeFeedback']);
+    Route::get('/tickets/{ticket}/feedback', [TicketController::class, 'getFeedback']);
+
     // Ticket Diagnosis Routes
     Route::get('/tickets/{ticket}/diagnosis', [TicketDiagnosisController::class, 'show']);
     Route::post('/tickets/{ticket}/diagnosis', [TicketDiagnosisController::class, 'store']);
@@ -99,6 +104,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Work Order Management Routes
     Route::apiResource('work-orders', WorkOrderController::class);
     Route::patch('/work-orders/{workOrder}/status', [WorkOrderController::class, 'updateStatus']);
+    Route::patch('/work-orders/{workOrder}/change-bmn-condition', [WorkOrderController::class, 'changeBMNCondition']);
     Route::get('/work-orders/stats/summary', [WorkOrderController::class, 'stats']);
     
     // Sparepart Request Management Routes
